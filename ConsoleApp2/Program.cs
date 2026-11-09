@@ -1,80 +1,93 @@
-﻿using System;
-using System.IO;
-using Microsoft.Win32;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using Microsoft.Win32;
+using System;
 using System.Diagnostics;
-using System.Security.Principal;
+using System.IO;
+using System.Threading;
 
 namespace ConsoleApp2
 {
     internal class Program
     {
+        private const string MutexName = "Global\\ThPanelCloserSingleRun";
         private static readonly string appPath = Path.Combine(AppContext.BaseDirectory, @"D:\Thunder Master\ThPanel");
-        Process[] processes = Process.GetProcessesByName(processName: "ThPanel");
-        void StartAutoClose(int seconds)
-        {
-           
-            if (processes.Length == 0)
-            {
-                 Console.WriteLine("Not running");
-                 Process.Start(new ProcessStartInfo
-                 {
-                     FileName = appPath,
-                     UseShellExecute = true,
-                     Verb = "runas"
-                 });
-            }
-            else
-            {
-                if (processes.Length != 0)
-                {
-                    Console.WriteLine("Running");
-                }
-                Console.WriteLine("Auto closing the application after {0} seconds.", seconds);
-            }
-        }
+        private static readonly string[] TargetProcesses = { "ThPanel", "GCC" };
+        private static int _startupCleanupDone;
+        private static int _wakeUpCleanupDone;
 
         static void Main(string[] args)
         {
-            Program program = new Program();
-            program.StartAutoClose(10);
+            using (var mutex = new Mutex(false, MutexName))
+            {
+                Console.WriteLine("Monitoring startup and wake up events...");
 
-            string[] names = { "ThPanel", "GCC" };
-            var nameProc = names.SelectMany(proc => Process.GetProcessesByName(proc)).ToArray();
+                if (!mutex.WaitOne(0))
+                {
+                    return;
+                }
 
-            var timer = new System.Timers.Timer(5000);
-                    timer.Start();
-                    timer.Elapsed += (sender, eventArgs) =>
+                SystemEvents.PowerModeChanged += (obj, eventArgs) => 
+                {
+                    if (eventArgs.Mode == PowerModes.Resume)         
                     {
-                        foreach (Process processes in nameProc)
+                        if (Interlocked.Exchange(ref _wakeUpCleanupDone, 1) == 0)   // ----------- выход из сна
                         {
-                            processes.Kill();
-
-                            try
-                            {
-                                if (processes.HasExited)
-                                {
-                                    Console.WriteLine("Process closed successfully.");
-                                }
-                                else
-                                {
-                                    Console.WriteLine("Failed to close the process.");
-                                }
-                            }
-
-                            catch (System.ComponentModel.Win32Exception ex)
-                            {
-                                Console.WriteLine("Cannot inspect the process. Run this application as administrator. " + ex.Message);
-                            }
-                            timer.Stop();
+                            RunCleanup("System wake‑up");
                         }
+                    }
+                };
 
-                        Environment.Exit(0);
-                    };
-                    Console.ReadLine();
+                if (Interlocked.Exchange(ref _startupCleanupDone, 1) == 0)          // ----------- при старте 
+                {
+                    RunCleanup("Startup system");
+                }
+                Console.ReadLine();
+            }
+        }
+
+        private static void RunCleanup(string state)
+        {
+            Process[] processes = Process.GetProcessesByName(processName: "ThPanel");
+            var timer = new System.Timers.Timer(5000);
+            timer.AutoReset = false;
+            if (processes.Length == 0)
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = appPath,
+                        UseShellExecute = true,
+                        Verb = "runas"
+                    });
+                    Console.WriteLine($"[{state}] Started ThPanel.");
+
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[{state}] Failed to start ThPanel: {ex.Message}");
+                    return;
+                }
+            }
+            timer.Start();
+            timer.Elapsed += (obj, eventArgs) =>
+            {
+                foreach (var processName in TargetProcesses)
+                {
+                    foreach (var process in Process.GetProcessesByName(processName))
+                    {
+                        try
+                        {
+                            process.Kill();
+                            Console.WriteLine($"[{state}] Closed: [{processName}]");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[{state}] Unable to close [{processName}] \n\rError Message: {ex.Message}");
+                        }
+                    }
+                }
+                Environment.Exit(0);
+            };
         }
     }
 }
