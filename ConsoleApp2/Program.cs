@@ -1,6 +1,7 @@
 ﻿using Microsoft.Win32;
 using System;
 using System.Diagnostics;
+using System.Diagnostics.Tracing;
 using System.IO;
 using System.Threading;
 
@@ -16,6 +17,7 @@ namespace ConsoleApp2
 
         static void Main(string[] args)
         {
+       
             using (var mutex = new Mutex(false, MutexName))
             {
                 Console.WriteLine("Monitoring startup and wake up events...");
@@ -24,23 +26,49 @@ namespace ConsoleApp2
                 {
                     return;
                 }
-
-                SystemEvents.PowerModeChanged += (obj, eventArgs) => 
+                bool isWakeUp = IsSystemWakeUp();
+                // сработает при выходе из гибернации
+                if (isWakeUp) // если это выход из сна, запустить метод с измененным state
                 {
-                    if (eventArgs.Mode == PowerModes.Resume)         
+                    if (Interlocked.Exchange(ref _wakeUpCleanupDone, 1) == 0)   
                     {
-                        if (Interlocked.Exchange(ref _wakeUpCleanupDone, 1) == 0)   // ----------- выход из сна
-                        {
-                            RunCleanup("System wake‑up");
-                        }
+                        RunCleanup("System wake‑up");
                     }
-                };
-
-                if (Interlocked.Exchange(ref _startupCleanupDone, 1) == 0)          // ----------- при старте 
+                }
+                // сработает при старте 
+                if (Interlocked.Exchange(ref _startupCleanupDone, 1) == 0)     
                 {
                     RunCleanup("Startup system");
                 }
-                Console.ReadLine();
+            }   
+            Console.ReadLine();
+        }
+
+        static bool IsSystemWakeUp()
+        {
+            try
+            {
+                // проверить журнал событий за последние 3 минуты 
+                EventLog eventLog = new EventLog("System");
+                DateTime threeMinutesAgo = DateTime.Now.AddMinutes(-3);
+
+                foreach (EventLogEntry entry in eventLog.Entries)
+                {
+                    if (entry.TimeGenerated > threeMinutesAgo)
+                    {
+                        if (entry.Source == "Microsoft-Windows-Kernel-Power" && 
+                           (entry.EventID == 187 || entry.EventID == 42))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error checking event log: {ex.Message}");
+                return false;
             }
         }
 
